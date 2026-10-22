@@ -1,0 +1,13 @@
+# Simulation and environment
+simglucose==0.2.11
+gymnasium==0.29.1
+numpy==2.5.4
+pandas==3.0.6
+scipy==1.18.1
+
+# Deep reinforcement learning
+torch==2.14.1
+
+# Optional: install if used by plotting or tests
+matplotlib
+pytest
