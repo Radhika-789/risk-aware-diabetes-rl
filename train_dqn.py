@@ -19,8 +19,7 @@ import numpy as np
 import torch
 
 from dqn import DQNAgent, DQNPolicy
-from metrics import episode_metrics
-from rollout import evaluate_policy
+from rollout import evaluate_policy, metrics_from_log
 from t1d_env import RewardConfig, ShieldConfig, T1DRiskEnv, TRAIN_PATIENTS, VAL_PATIENTS
 
 VAL_SEED_BASE = 10_000_000   # fixed validation episodes, identical at every evaluation
@@ -67,6 +66,11 @@ def make_env(patients, cfg):
         reward_cfg=RewardConfig(mode=cfg["reward_mode"]), shield_cfg=ShieldConfig(enabled=cfg["shield"]))
 
 
+def epsilon_at(ep, eps_start, eps_end, decay_episodes):
+    """Linear decay from eps_start to eps_end over `decay_episodes` episodes, then constant."""
+    return max(eps_end, eps_start - (eps_start - eps_end) * ep / decay_episodes)
+
+
 def mean_of(rows, key):
     return float(np.mean([r[key] for r in rows]))
 
@@ -90,6 +94,12 @@ def main():
                      batch_size=args.batch_size, buffer_size=args.buffer_size,
                      target_update=args.target_update, double=not args.no_double, seed=args.seed)
 
+    max_steps = args.episodes * env.max_decisions
+    if max_steps < args.learning_starts:
+        print(f"WARNING: at most {max_steps} environment steps can run but --learning-starts is {args.learning_starts}. "
+              "No gradient update will happen, so the network stays untrained (loss prints as nan). "
+              "Fine as a pipeline check; not a real training run.", flush=True)
+
     train_f = open(os.path.join(run_dir, "train_log.csv"), "w", newline="")
     val_f = open(os.path.join(run_dir, "val_log.csv"), "w", newline="")
     train_w = csv.writer(train_f)
@@ -101,7 +111,7 @@ def main():
     best_val, total_steps, t0 = -np.inf, 0, time.time()
     decay_eps = max(1, int(args.eps_decay_frac * args.episodes))
     for ep in range(args.episodes):
-        eps = max(args.eps_end, args.eps_start - (args.eps_start - args.eps_end) * ep / decay_eps)
+        eps = epsilon_at(ep, args.eps_start, args.eps_end, decay_eps)
         obs, _ = env.reset(seed=args.seed * 1_000_000 + ep)      # fresh patient / meals / noise each episode
         done, ret, losses = False, 0.0, []
         while not done:
@@ -115,7 +125,7 @@ def main():
                 if loss is not None:
                     losses.append(loss)
         log = env.episode_log()
-        m = episode_metrics(log["bg"], log["insulin_u"], log["meal_g"], terminated=log["terminated"])
+        m = metrics_from_log(env, log)
         train_w.writerow([ep + 1, total_steps, log["patient"], round(eps, 3), round(ret, 3),
                           round(m["tir_70_180"], 2), round(m["tbr_lt70"], 2), round(m["tbr_lt54"], 2),
                           round(m["tar_gt180"], 2), round(m["mean_bg"], 1), int(log["terminated"]),

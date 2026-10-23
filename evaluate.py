@@ -24,7 +24,7 @@ from t1d_env import RewardConfig, ShieldConfig, T1DRiskEnv, TEST_PATIENTS, TRAIN
 
 SPLITS = {"test": TEST_PATIENTS, "val": VAL_PATIENTS, "train": TRAIN_PATIENTS}
 KEY_METRICS = ["tir_70_180", "tbr_lt70", "tbr_lt54", "tar_gt180", "mean_bg", "cv_bg", "lbgi", "hbgi",
-               "terminated_early", "total_insulin_u", "episode_return"]
+               "terminated_early", "survival_fraction", "total_insulin_u", "episode_return"]
 DEFAULT_CFG = dict(episode_days=1.0, action_repeat=5, history_len=8, announce_meals=False,
                    reward_mode="risk", shield=True)
 
@@ -34,6 +34,24 @@ def make_env(patients, cfg):
         patients=patients, episode_days=cfg["episode_days"], action_repeat=cfg["action_repeat"],
         history_len=cfg["history_len"], announce_meals=cfg["announce_meals"],
         reward_cfg=RewardConfig(mode=cfg["reward_mode"]), shield_cfg=ShieldConfig(enabled=cfg["shield"]))
+
+
+def resolve_labels(checkpoints, labels, reserved):
+    """Unique display names for checkpoints. Names key every per-policy summary row, so duplicates (or reuse of a
+    baseline name) would silently merge different policies into one row."""
+    if labels:
+        if len(labels) != len(checkpoints):
+            raise SystemExit("--labels must match --checkpoints (one label per checkpoint)")
+        out = list(labels)
+    else:
+        out = []
+        for c in checkpoints:
+            run = os.path.basename(os.path.dirname(os.path.normpath(c))) or "dqn"
+            out.append(f"{run}_{os.path.splitext(os.path.basename(c))[0]}")
+    bad = sorted({l for l in out if out.count(l) > 1} | (set(out) & set(reserved)))
+    if bad:
+        raise SystemExit(f"checkpoint labels must be unique and must not reuse baseline names; problem: {bad}")
+    return out
 
 
 def boot_ci(x, n=1000, seed=0):
@@ -115,14 +133,13 @@ def main():
     policies, cfg = list(make_baselines(seed=0)), dict(DEFAULT_CFG)
     if args.checkpoints:
         from dqn import DQNAgent, DQNPolicy      # torch imported only when needed
-        labels = args.labels or [os.path.basename(os.path.dirname(c)) or "dqn" for c in args.checkpoints]
-        assert len(labels) == len(args.checkpoints), "--labels must match --checkpoints"
+        labels = resolve_labels(args.checkpoints, args.labels, [p.name for p in policies])
         for i, (ck, lab) in enumerate(zip(args.checkpoints, labels)):
             agent, ck_cfg = DQNAgent.load(ck)
             if i == 0:
                 cfg.update(ck_cfg)
-            elif ck_cfg and (ck_cfg.get("history_len"), ck_cfg.get("announce_meals")) != (cfg["history_len"], cfg["announce_meals"]):
-                raise SystemExit(f"checkpoint {ck} has a different observation config than the first one")
+            elif ck_cfg and any(ck_cfg.get(k, cfg[k]) != cfg[k] for k in ("history_len", "announce_meals", "action_repeat")):
+                raise SystemExit(f"checkpoint {ck} has a different observation/decision-interval config than the first one")
             policies.append(DQNPolicy(agent, lab))
     if args.episode_days:
         cfg["episode_days"] = args.episode_days
@@ -131,6 +148,11 @@ def main():
     print("eval env config:", json.dumps(cfg))
 
     env = make_env(SPLITS[args.split], cfg)
+    for pol in policies:
+        agent = getattr(pol, "agent", None)
+        if agent is not None and (agent.obs_dim != env.obs_dim or agent.n_actions != env.action_space.n):
+            raise SystemExit(f"checkpoint '{pol.name}' expects obs_dim={agent.obs_dim}, n_actions={agent.n_actions}, but the "
+                             f"evaluation environment has obs_dim={env.obs_dim}, n_actions={env.action_space.n}")
     rows = []
     for pol in policies:
         res = evaluate_policy(env, pol, SPLITS[args.split], args.episodes_per_patient, args.seed_base)

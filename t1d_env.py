@@ -238,7 +238,11 @@ class T1DRiskEnv(gym.Env):
         idx = int(self.np_random.integers(0, len(self.patients)))
         s_pat, s_sen, s_meal = (int(x) for x in self.np_random.integers(0, 2**31 - 1, size=3))
         hour = int(self.np_random.integers(0, 24)) if self.random_start_hour else 0
-        self.patient_name = str(options.get("patient") or self.patients[idx])
+        requested = options.get("patient")
+        if requested is not None and requested not in self.patients:
+            # Leakage guard: an environment built for one split must not run patients from another split.
+            raise ValueError(f"patient {requested!r} is not in this environment's patient list")
+        self.patient_name = str(requested or self.patients[idx])
         self.pinfo = patient_info(self.patient_name)
 
         patient = T1DPatient.withName(self.patient_name, random_init_bg=True, seed=s_pat)

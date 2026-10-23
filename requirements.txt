@@ -1,4 +1,7 @@
 # Simulation and environment
+# setuptools<81: SimGlucose depends on the legacy gym==0.9.4, which needs distutils and pkg_resources;
+# setuptools>=81 no longer ships pkg_resources, so `import simglucose` fails without this pin (Python 3.12+).
+setuptools>=77,<81
 simglucose==0.2.11
 gymnasium==0.29.1
 numpy==2.5.4

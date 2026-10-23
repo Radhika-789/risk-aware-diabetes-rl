@@ -1,7 +1,26 @@
 """rollout.py - run policies in T1DRiskEnv and collect per-episode metrics (research simulation only)."""
 from __future__ import annotations
 
+import numpy as np
+
 from metrics import episode_metrics
+
+
+def metrics_from_log(env, log):
+    """Episode metrics from the full-resolution log.
+
+    If the simulator ended the episode early (true BG < 10 or > 600), the remaining time of the episode is
+    counted at the terminal BG (which is out of range), so a policy cannot look better by crashing early.
+    `survival_fraction` = fraction of the episode that was actually simulated (1.0 if it did not terminate).
+    Insulin and carbohydrate totals are NOT padded."""
+    bg = log["bg"]
+    n_total = env.max_decisions * env.action_repeat
+    recorded = len(bg)
+    if log["terminated"] and recorded < n_total:
+        bg = np.concatenate([bg, np.full(n_total - recorded, bg[-1])])
+    m = episode_metrics(bg, log["insulin_u"], log["meal_g"], terminated=log["terminated"])
+    m["survival_fraction"] = recorded / n_total
+    return m
 
 
 def run_episode(env, policy, seed, patient=None, keep_log=False):
@@ -19,7 +38,7 @@ def run_episode(env, policy, seed, patient=None, keep_log=False):
         total += r
         done = term or trunc
     log = env.episode_log()
-    m = episode_metrics(log["bg"], log["insulin_u"], log["meal_g"], terminated=log["terminated"])
+    m = metrics_from_log(env, log)
     m.update(
         episode_return=float(total),
         patient=log["patient"],

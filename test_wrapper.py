@@ -6,12 +6,13 @@ Prints PASS/FAIL per test and exits with code 1 if any test fails.
 import sys
 import time
 import traceback
+from types import SimpleNamespace
 
 import numpy as np
 
 import metrics
-from baselines import make_baselines
-from rollout import run_episode
+from baselines import Policy, make_baselines
+from rollout import metrics_from_log, run_episode
 from t1d_env import (RewardConfig, ShieldConfig, T1DRiskEnv, TEST_PATIENTS, TRAIN_PATIENTS, VAL_PATIENTS,
                      apply_shield, decode_obs, patient_info, reward_bg, SAMPLE_TIME_MIN)
 
@@ -211,6 +212,92 @@ def test_baselines_run_and_paired_episodes_identical_inputs():
     carbs = {round(v["total_carbs_g"], 6) for v in seen.values()}
     assert len(carbs) == 1, carbs
     assert set(seen) == {"random", "fixed_basal", "cgm_rule", "announced_bb"}
+
+
+
+# ----------------------------------------------------------------------------------------------
+# Phase 1 audit tests
+# ----------------------------------------------------------------------------------------------
+@test
+def test_patient_override_guard_and_train_env_isolation():
+    train_env = T1DRiskEnv(patients=TRAIN_PATIENTS)
+    seen = {train_env.reset(seed=i)[1]["patient"] for i in range(60)}
+    assert seen <= set(TRAIN_PATIENTS) and not (seen & set(VAL_PATIENTS + TEST_PATIENTS))
+    train_env.reset(seed=0, options={"patient": TRAIN_PATIENTS[0]})          # allowed
+    for outside in (VAL_PATIENTS[0], TEST_PATIENTS[0]):
+        try:
+            train_env.reset(seed=0, options={"patient": outside})
+            raise AssertionError("override with a patient outside the env's list must raise")
+        except ValueError:
+            pass
+
+
+@test
+def test_cgm_history_alignment_and_reward_integration():
+    """Observation history = CGM at decision boundaries (initial fill = the reset reading the agent saw);
+    step CGM equals the simulator's last recorded CGM; reward = mean per-sample reward of the TRUE BG."""
+    env = short_env(episode_days=0.5, shield_cfg=NO_SHIELD)
+    obs, info = env.reset(seed=3, options={"patient": "adult#009"})
+    first_cgm = info["cgm"]
+    assert np.allclose(obs[:8] * 400, first_cgm, atol=1e-3), "history must start filled with the reset reading"
+    for d in range(1, 9):
+        obs, r, term, trunc, info = env.step(env.nearest_action(1.0, 0.03 if d == 2 else 0.0))
+        assert not term
+        for j, k in enumerate(range(d - 7, d + 1)):      # entry j = decision boundary k (k < 1: initial fill)
+            expected = env.sim.CGM_hist[5 * k] if k >= 1 else first_cgm
+            assert abs(obs[j] * 400 - expected) < 1e-3, (d, j)
+        assert abs(env.sim.CGM_hist[-1] - env.cgm_last) < 1e-9
+        assert abs(obs[7] * 400 - env.cgm_last) < 1e-3
+        expected_r = np.mean([reward_bg(b, env.rcfg) for b in env.sim.BG_hist[-5:]])
+        assert abs(r - expected_r) < 1e-9
+
+
+@test
+def test_all_actions_map_to_the_documented_table():
+    env = short_env()
+    env.reset(seed=0, options={"patient": "adolescent#010"})
+    tdi = env.pinfo["TDI"]
+    for a in range(env.action_space.n):
+        ib, ik = divmod(a, 4)
+        mult, units = env.decode_action(a)
+        assert mult == env.acfg.basal_mults[ib] and abs(units - env.acfg.bolus_fracs_of_tdi[ik] * tdi) < 1e-12
+        assert env.nearest_action(mult, env.acfg.bolus_fracs_of_tdi[ik]) == a
+
+
+@test
+def test_initial_bg_in_range_for_all_patients():
+    env = T1DRiskEnv(patients=TRAIN_PATIENTS + VAL_PATIENTS + TEST_PATIENTS)
+    for p in TRAIN_PATIENTS + VAL_PATIENTS + TEST_PATIENTS:
+        _, info = env.reset(seed=7, options={"patient": p})
+        assert 70 <= info["bg"] <= 180 and 70 <= info["cgm"] <= 180, (p, info["bg"], info["cgm"])
+
+
+@test
+def test_metrics_from_log_counts_remaining_time_after_termination():
+    env = SimpleNamespace(max_decisions=24, action_repeat=5)             # 120 samples per episode
+    bg = np.append(np.full(59, 120.0), 9.0)                              # 60 samples, then crash below 10
+    log = {"bg": bg, "insulin_u": np.zeros(60), "meal_g": np.zeros(60), "terminated": True}
+    m = metrics_from_log(env, log)
+    assert m["n_samples"] == 120 and abs(m["survival_fraction"] - 0.5) < 1e-12
+    assert abs(m["tir_70_180"] - 100 * 59 / 120) < 1e-9, m["tir_70_180"]
+    assert abs(m["tbr_lt54"] - 100 * 61 / 120) < 1e-9, m["tbr_lt54"]
+    ok = metrics_from_log(env, {"bg": np.full(120, 120.0), "insulin_u": np.zeros(120),
+                                "meal_g": np.zeros(120), "terminated": False})
+    assert ok["survival_fraction"] == 1.0 and ok["tir_70_180"] == 100.0
+
+
+@test
+def test_crashed_episode_cannot_report_tir_above_survival_fraction():
+    class MaxInsulin(Policy):
+        name = "max_insulin"
+
+        def act(self, obs, env):
+            return env.nearest_action(1.5, 0.12)
+    env = T1DRiskEnv(patients=TEST_PATIENTS, episode_days=1.0, shield_cfg=NO_SHIELD)
+    m = run_episode(env, MaxInsulin(), seed=3, patient="adult#009")
+    assert m["terminated_early"] == 1.0 and m["survival_fraction"] < 1.0
+    assert m["n_samples"] == env.max_decisions * env.action_repeat
+    assert m["tir_70_180"] <= 100 * m["survival_fraction"] + 1e-9, (m["tir_70_180"], m["survival_fraction"])
 
 
 if __name__ == "__main__":
