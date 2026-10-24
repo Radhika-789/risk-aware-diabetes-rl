@@ -23,7 +23,7 @@ from rollout import evaluate_policy, run_episode
 from t1d_env import RewardConfig, ShieldConfig, T1DRiskEnv, TEST_PATIENTS, TRAIN_PATIENTS, VAL_PATIENTS
 
 SPLITS = {"test": TEST_PATIENTS, "val": VAL_PATIENTS, "train": TRAIN_PATIENTS}
-KEY_METRICS = ["tir_70_180", "tbr_lt70", "tbr_lt54", "tar_gt180", "mean_bg", "cv_bg", "lbgi", "hbgi",
+KEY_METRICS = ["tir_70_180", "tbr_lt70", "tbr_lt54", "tar_gt180", "tar_gt250", "mean_bg", "cv_bg", "lbgi", "hbgi",
                "terminated_early", "survival_fraction", "total_insulin_u", "episode_return"]
 DEFAULT_CFG = dict(episode_days=1.0, action_repeat=5, history_len=8, announce_meals=False,
                    reward_mode="risk", shield=True)
@@ -78,11 +78,11 @@ def md_table(summary: pd.DataFrame, df: pd.DataFrame, split: str) -> str:
     def cell(r, k, d=1):
         return f"{r[k + '_mean']:.{d}f} [{r[k + '_ci_lo']:.{d}f}, {r[k + '_ci_hi']:.{d}f}]"
     lines = [f"### Overall ({split} patients; mean [95% bootstrap CI over episodes])", "",
-             "| Policy | n | TIR 70-180 % | Time <70 % | Time <54 % | Time >180 % | Mean BG | LBGI | HBGI | Terminated | Return |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| Policy | n | TIR 70-180 % | Time <70 % | Time <54 % | Time >180 % | Time >250% | Mean BG | LBGI | HBGI | Terminated | Return |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for _, r in summary.iterrows():
         lines.append(f"| {r['policy']} | {int(r['n_episodes'])} | {cell(r, 'tir_70_180')} | {cell(r, 'tbr_lt70')} | "
-                     f"{cell(r, 'tbr_lt54')} | {cell(r, 'tar_gt180')} | {cell(r, 'mean_bg', 0)} | {cell(r, 'lbgi', 2)} | "
+                     f"{cell(r, 'tbr_lt54')} | {cell(r, 'tar_gt180')} | {cell(r, 'tar_gt250')} | {cell(r, 'mean_bg', 0)} | {cell(r, 'lbgi', 2)} | "
                      f"{cell(r, 'hbgi', 2)} | {r['terminated_early_mean']:.2f} | {cell(r, 'episode_return', 0)} |")
     df = df.assign(group=df["patient"].str.split("#").str[0])
     lines += ["", "### By age group (mean TIR % / mean time <70 %)", "",
@@ -158,8 +158,13 @@ def main():
         res = evaluate_policy(env, pol, SPLITS[args.split], args.episodes_per_patient, args.seed_base)
         for r in res:
             rows.append({"policy": pol.name, **r})
-        print(f"  {pol.name:14s} TIR {np.mean([r['tir_70_180'] for r in res]):5.1f}% | "
-              f"<70 {np.mean([r['tbr_lt70'] for r in res]):5.1f}% | terminated {np.mean([r['terminated_early'] for r in res]):.2f}")
+        print(f"  {pol.name:14s} "
+    f"TIR {np.mean([r['tir_70_180'] for r in res]):5.1f}% | "
+    f"<70 {np.mean([r['tbr_lt70'] for r in res]):5.1f}% | "
+    f"<54 {np.mean([r['tbr_lt54'] for r in res]):5.1f}% | "
+    f">180 {np.mean([r['tar_gt180'] for r in res]):5.1f}% | "
+    f">250 {np.mean([r['tar_gt250'] for r in res]):5.1f}% | "
+    f"terminated {np.mean([r['terminated_early'] for r in res]):.2f}")
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(args.out, "episodes.csv"), index=False)
     summary = summarize(df)
