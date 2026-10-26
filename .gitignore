@@ -1,6 +1,30 @@
-diabetes-env/
+
+# Python virtual environments
 .venv/
+diabetes-env/
+venv/
+
+# Python cache
 __pycache__/
 *.py[cod]
-runs/
+
+# Test and tooling caches
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# Backup files
+*.bak
+
+# OS clutter
+.DS_Store
+Thumbs.db

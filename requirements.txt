@@ -14,3 +14,8 @@ torch==2.14.1
 # Optional: install if used by plotting or tests
 matplotlib
 pytest
+# Research UI backend (backend/app.py)
+fastapi
+uvicorn[standard]
+httpx  # TestClient in backend/tests
+# Optional: playwright for frontend/e2e/ui_smoke.py
