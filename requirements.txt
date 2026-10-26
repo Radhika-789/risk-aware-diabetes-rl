@@ -19,3 +19,4 @@ fastapi
 uvicorn[standard]
 httpx  # TestClient in backend/tests
 # Optional: playwright for frontend/e2e/ui_smoke.py
+pytest
