@@ -22,10 +22,6 @@
 
 </div>
 
-> [!WARNING]
-> **Research simulation only.** This is not a medical device and nothing here is clinical advice. Simulated results do not
-> imply clinical performance.
-
 ---
 
 ## 📑 Table of contents
@@ -119,7 +115,8 @@ risk-aware-diabetes-rl/
 │   ├── eval_300_val/         # validation-set evaluation
 │   └── eval_300_val_original/
 ├── graphs_results/           # Figures 01-10, traces.png, summary_table.md
-├── backend/ + frontend/      # Optional web UI for live simulation and analysis
+├── backend/                  # Optional web UI: FastAPI backend (+ backend/tests)
+├── frontend/                 # Optional web UI: React/Vite frontend (+ e2e/ui_smoke.py)
 └── GlucoGuard_UI (2).mp4     # Web UI screen recording
 ```
 
@@ -152,26 +149,25 @@ git clone https://github.com/Radhika-789/risk-aware-diabetes-rl.git
 cd risk-aware-diabetes-rl
 ```
 
-<table>
-<tr><th>🐧 Linux / 🍎 macOS</th><th>🪟 Windows (PowerShell)</th></tr>
-<tr><td>
+### 🐧 Linux / 🍎 macOS (Bash)
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-</td><td>
+### 🪟 Windows (PowerShell)
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-</td></tr>
-</table>
+> [!NOTE]
+> If PowerShell blocks the activation script, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` once in that
+> window and activate again.
 
 ---
 
@@ -215,18 +211,19 @@ Run `python train_dqn.py --help` for all options.
 python evaluate.py --out results_baselines --episodes-per-patient 2
 
 # baselines + trained checkpoints on the held-out test patients
-python evaluate.py --split test --episodes-per-patient 5 \
-    --checkpoints runs/dqn_risk_s0_300/best.pt runs/dqn_risk_s0_300/final.pt \
-    --labels best_300 final_300 --out runs/eval_300_test_both --plot
+python evaluate.py --split test --episodes-per-patient 5 --checkpoints runs/dqn_risk_s0_300/best.pt runs/dqn_risk_s0_300/final.pt --labels best_300 final_300 --out runs/eval_300_test_both --plot
 ```
 
-Outputs: `episodes.csv`, `summary.csv`, `summary.md`, and `traces.png` (with `--plot`). `--split` accepts `test`, `val` or `train`.
+Outputs: `episodes.csv`, `summary.csv`, `summary.md`, and `traces.png` (with `--plot`).
+
+> [!NOTE]
+> Commands are written on one line so they work unchanged in Bash, PowerShell and cmd. Do not paste Bash `\` line
+> continuations into PowerShell. `--split` accepts `test`, `val` or `train`.
 
 ### 3️⃣ Generate figures
 
 ```bash
-python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both \
-    --out graphs_results --dqn-label best_300
+python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both --out graphs_results --dqn-label best_300
 ```
 
 ---
@@ -285,13 +282,10 @@ the logged training time of the 300-episode run).
 python train_dqn.py --episodes 300 --seed 0 --run-name dqn_risk_s0_300
 
 # 2️⃣ Evaluate on the 6 held-out test patients (5 episodes each = 30 per policy)
-python evaluate.py --split test --episodes-per-patient 5 \
-    --checkpoints runs/dqn_risk_s0_300/best.pt runs/dqn_risk_s0_300/final.pt \
-    --labels best_300 final_300 --out runs/eval_300_test_both --plot
+python evaluate.py --split test --episodes-per-patient 5 --checkpoints runs/dqn_risk_s0_300/best.pt runs/dqn_risk_s0_300/final.pt --labels best_300 final_300 --out runs/eval_300_test_both --plot
 
 # 3️⃣ Figures and summary table
-python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both \
-    --out graphs_results --dqn-label best_300
+python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both --out graphs_results --dqn-label best_300
 ```
 
 <details>
@@ -328,29 +322,46 @@ depend on it.
 <details>
 <summary><b>▶️ How to run the web UI</b></summary>
 
-Requires Node.js and npm. From the repository root, with the Python environment active:
+Requires Node.js and npm. Run everything from the repository root with the Python environment active.
+
+**Option A: single server (built UI)**
 
 ```bash
-cd frontend && npm install && npm run build && cd ..
-uvicorn backend.app:app --port 8000      # open http://localhost:8000
+cd frontend
+npm install
+npm run build
+cd ..
+python -m uvicorn backend.app:app --port 8000
 ```
 
-To show the bundled evaluation results in the Analytics page, point the API at the `runs/eval_*` folders:
+Open http://localhost:8000. The backend serves the built `frontend/dist` itself.
+
+Useful pages once it is running: http://127.0.0.1:8000/experiments (UI) and http://127.0.0.1:8000/api/runs (API; lists the
+`dqn_risk_s0_300` run). The port in the URL must match the `--port` you started the server with.
+
+**Option B: development with hot reload (two terminals)**
 
 ```bash
-# Linux / macOS
-GG_RESULTS_GLOB="runs/eval_*" uvicorn backend.app:app --port 8000
+# Terminal 1 (repository root)
+python -m uvicorn backend.app:app --reload --port 8000
+
+# Terminal 2
+cd frontend
+npm install
+npm run dev
 ```
 
-```powershell
-# Windows (PowerShell)
-$env:GG_RESULTS_GLOB = "runs/eval_*"
-uvicorn backend.app:app --port 8000
-```
+Open http://localhost:5173. The dev server proxies `/api` to `http://127.0.0.1:8000`.
 
-For development with hot reload, run `uvicorn backend.app:app --reload --port 8000` in one terminal and
-`cd frontend && npm run dev` in another (UI at http://localhost:5173).
-API tests: `python -m pytest backend/tests -q`.
+> [!IMPORTANT]
+> Keep the backend on port **8000**: the Vite proxy (`frontend/vite.config.ts`) and the UI smoke test
+> (`frontend/e2e/ui_smoke.py`) are hard-coded to it. To use another port (e.g. 8001), change the proxy target in
+> `frontend/vite.config.ts` too. If 8000 is busy, stop the other process first.
+
+The Analytics page automatically picks up the bundled evaluation results in `runs/eval_*/` (and any `results*/` folder at the
+repository root), so no extra configuration is needed.
+
+API tests (from the repository root): `python -m pytest backend/tests -q`.
 
 </details>
 
