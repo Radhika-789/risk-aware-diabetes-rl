@@ -1,580 +1,244 @@
+"""
+graphs.py - the 10 report figures from one training run and one evaluation directory.
 
-from pathlib import Path
-import re
-import warnings
+    python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both --out figures
+    python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both --dqn-label dqn_risk_s0_300_best
 
+Reads only files written by train_dqn.py (train_log.csv, val_log.csv) and evaluate.py (summary.csv, episodes.csv).
+Writes figures/01_... to figures/10_...png plus figures/summary_table.md. Research simulation only.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-ROOT = Path(__file__).resolve().parent
-RUN_DIR = ROOT / "runs" / "dqn_risk_s0_300"
-VAL_DIR = ROOT / "runs" / "eval_300_val"
-TEST_DIR = ROOT / "runs" / "eval_300_test"
-
-OUT_DIR = ROOT / "results" / "graphs"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-POLICIES = ["cgm_rule", "best_300", "final_300", "announced_bb"]
-
-# Moving-average window for the training curves.
-SMOOTH_WINDOW = 15
-
+# ---------------------------------------------------------------- style
 plt.rcParams.update({
-    "figure.figsize": (10, 6),
-    "figure.dpi": 120,
-    "savefig.dpi": 300,
-    "font.size": 11,
-    "axes.titlesize": 14,
-    "axes.labelsize": 11,
-    "legend.fontsize": 9,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.grid": True,
-    "grid.alpha": 0.25,
+    "figure.dpi": 150, "savefig.dpi": 200, "savefig.bbox": "tight",
+    "font.size": 10, "axes.titlesize": 12, "axes.titleweight": "bold", "axes.labelsize": 10,
+    "axes.spines.top": False, "axes.spines.right": False, "axes.grid": True, "grid.alpha": 0.25,
+    "legend.frameon": False, "legend.fontsize": 9,
 })
+C = {"in": "#2a9d8f", "low": "#e9a23b", "sev_low": "#d7263d", "high": "#f28e2b", "very_high": "#a23b72",
+     "line": "#1f4e79", "ma": "#e76f51", "val": "#264653", "best": "#e76f51", "grey": "#8d99ae"}
+POLICY_ORDER = ["random", "fixed_basal", "cgm_rule", "announced_bb"]   # baselines first, DQN checkpoints after
+NICE = {"random": "Random", "fixed_basal": "Fixed basal", "cgm_rule": "CGM rule", "announced_bb": "Announced BB\n(privileged)"}
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def normalise_name(name):
-    """Make CSV column names easier to match."""
-    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
-
-
-def read_csv(path):
-    if not path.exists():
-        print(f"[SKIP] File not found: {path}")
-        return None
-
-    try:
-        df = pd.read_csv(path)
-    except Exception as exc:
-        print(f"[SKIP] Could not read {path}: {exc}")
-        return None
-
-    if df.empty:
-        print(f"[SKIP] CSV is empty: {path}")
-        return None
-
-    print(f"\n[READ] {path.relative_to(ROOT)}")
-    print("       Columns:", list(df.columns))
-    return df
+def nice(p: str) -> str:
+    if p in NICE:
+        return NICE[p]
+    # checkpoint labels like dqn_risk_s0_300_best -> "DQN\ndqn_risk_s0_300 best"; wrap long names on two lines
+    parts = p.split("_")
+    if len(parts) > 2:
+        mid = len(parts) // 2
+        return "_".join(parts[:mid]) + "\n" + "_".join(parts[mid:])
+    return p
 
 
-def find_column(df, aliases):
-    """Return the first column matching one of the alias names."""
-    if df is None:
-        return None
-
-    lookup = {normalise_name(c): c for c in df.columns}
-
-    for alias in aliases:
-        key = normalise_name(alias)
-        if key in lookup:
-            return lookup[key]
-
-    return None
+def moving_avg(x, w):
+    x = pd.Series(x, dtype=float)
+    return x.rolling(w, min_periods=max(1, w // 3)).mean()
 
 
-def numeric_column(df, aliases):
-    col = find_column(df, aliases)
-    if col is None:
-        return None, None
-
-    values = pd.to_numeric(df[col], errors="coerce")
-    if values.notna().sum() == 0:
-        return None, col
-
-    return values, col
+def order_policies(policies, dqn_label):
+    base = [p for p in POLICY_ORDER if p in policies]
+    dqn = [p for p in policies if p not in POLICY_ORDER]
+    if dqn_label and dqn_label in dqn:          # the headline checkpoint goes last so it is the right-most bar
+        dqn = [p for p in dqn if p != dqn_label] + [dqn_label]
+    return base + dqn
 
 
-def save_figure(fig, filename):
-    path = OUT_DIR / filename
-    fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight")
+def bar_colors(policies, dqn_label):
+    return [C["line"] if (p == dqn_label or (dqn_label is None and p not in POLICY_ORDER)) else C["grey"] for p in policies]
+
+
+def save(fig, out, name):
+    path = os.path.join(out, name)
+    fig.savefig(path)
     plt.close(fig)
-    print(f"[SAVED] {path.relative_to(ROOT)}")
+    print("wrote", path)
 
 
-def clean_policy(value):
-    """Map common checkpoint and baseline names to standard labels."""
-    text = str(value).strip().lower()
-    text = text.replace("-", "_").replace(" ", "_")
-
-    if "announced" in text or "meal_announcement" in text:
-        return "announced_bb"
-    if "cgm" in text and "rule" in text:
-        return "cgm_rule"
-    if "best" in text and ("300" in text or "dqn" in text):
-        return "best_300"
-    if "final" in text and ("300" in text or "dqn" in text):
-        return "final_300"
-
-    # Exact common labels
-    if text in POLICIES:
-        return text
-
-    return text
+# ---------------------------------------------------------------- 1-4: training
+def fig_return(train, out, w):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(train.episode, train["return"], color=C["line"], lw=0.8, alpha=0.35, label="Episode return")
+    ax.plot(train.episode, moving_avg(train["return"], w), color=C["ma"], lw=2.2, label=f"{w}-episode moving average")
+    ax.axhline(0, color="k", lw=0.6, alpha=0.5)
+    ax.set(xlabel="Training episode", ylabel="Episode return (sum of per-interval reward)",
+           title="1. Training episode return")
+    eps_end = train.loc[train.epsilon <= train.epsilon.min() + 1e-9, "episode"].min()
+    if pd.notna(eps_end):
+        ax.axvline(eps_end, color=C["grey"], ls="--", lw=1)
+        ax.text(eps_end, ax.get_ylim()[1], f" ε reaches {train.epsilon.min():.2f}", va="top", fontsize=8, color=C["grey"])
+    ax.legend(loc="lower right")
+    fig.text(0.01, -0.03, "Each episode is a different training patient and meal schedule, hence the spread.", fontsize=8, color="#555")
+    save(fig, out, "01_training_return.png")
 
 
-def get_policy_column(df):
-    return find_column(
-        df,
-        [
-            "policy", "label", "agent", "model", "controller",
-            "method", "checkpoint", "algorithm", "name"
-        ],
-    )
+def fig_train_tir(train, out, w):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(train.episode, moving_avg(train.tir, w), color=C["in"], lw=2.2, label="TIR 70–180 mg/dL")
+    ax.plot(train.episode, moving_avg(train.tbr_lt70, w), color=C["low"], lw=2.0, label="TBR < 70 mg/dL")
+    ax.plot(train.episode, moving_avg(train.tar_gt180, w), color=C["high"], lw=2.0, label="TAR > 180 mg/dL")
+    ax.scatter(train.episode, train.tir, s=5, color=C["in"], alpha=0.2)
+    ax.set(xlabel="Training episode", ylabel="% of episode time", ylim=(0, 100),
+           title=f"2. Glycaemic metrics during training ({w}-episode moving average)")
+    ax.legend(ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.14))
+    save(fig, out, "02_training_tir.png")
 
 
-def to_percent(series):
-    """
-    Keep percentage values as-is. Convert proportions in [0, 1]
-    to percentages only if all non-null values are in that range.
-    """
-    s = pd.to_numeric(series, errors="coerce")
-    valid = s.dropna()
-
-    if len(valid) and valid.between(0, 1).all():
-        return s * 100
-
-    return s
-
-
-def metric_aliases(metric):
-    aliases = {
-        "tir": [
-            "tir_pct", "tir_percent", "tir", "time_in_range",
-            "time_in_range_pct", "time_in_range_percent",
-            "tir_70_180", "tir_70_180_pct",
-        ],
-        "tbr70": [
-            "tbr70_pct", "tbr_70_pct", "tbr70", "tbr_70",
-            "time_below_70", "time_below_70_pct",
-            "below_70_pct", "below70_pct", "percent_below_70",
-        ],
-        "tbr54": [
-            "tbr54_pct", "tbr_54_pct", "tbr54", "tbr_54",
-            "time_below_54", "time_below_54_pct",
-            "below_54_pct", "below54_pct", "percent_below_54",
-        ],
-        "tar180": [
-            "tar180_pct", "tar_180_pct", "tar180", "tar_180",
-            "time_above_180", "time_above_180_pct",
-            "above_180_pct", "above180_pct", "percent_above_180",
-        ],
-        "tar250": [
-            "tar250_pct", "tar_250_pct", "tar250", "tar_250",
-            "time_above_250", "time_above_250_pct",
-            "above_250_pct", "above250_pct", "percent_above_250",
-        ],
-        "return": [
-            "episode_return", "return", "total_return",
-            "mean_return", "avg_return", "reward", "episode_reward",
-        ],
-        "loss": [
-            "loss", "train_loss", "training_loss", "mean_loss",
-            "avg_loss", "q_loss", "td_loss",
-        ],
-        "episode": [
-            "episode", "episode_num", "episode_number",
-            "ep", "training_episode", "global_episode",
-        ],
-        "early_termination": [
-            "early_termination_rate", "early_termination_pct",
-            "terminated_early_pct", "early_terminated_pct",
-            "early_termination", "terminated_early",
-        ],
-    }
-    return aliases[metric]
-
-
-def get_metric(df, metric):
-    return numeric_column(df, metric_aliases(metric))
-
-
-def maybe_convert_metric(df, metric):
-    values, col = get_metric(df, metric)
-    if values is None:
-        return None, col
-    if metric in {"tir", "tbr70", "tbr54", "tar180", "tar250",
-                  "early_termination"}:
-        values = to_percent(values)
-    return values, col
-
-
-# ============================================================
-# GRAPHS 1-4: TRAINING AND VALIDATION
-# ============================================================
-
-def plot_training_return():
-    df = read_csv(RUN_DIR / "train_log.csv")
-    if df is None:
-        return
-
-    x, xcol = get_metric(df, "episode")
-    y, ycol = get_metric(df, "return")
-
-    if y is None:
-        print("[SKIP] Graph 1: no recognised return column.")
-        return
-
-    if x is None:
-        x = pd.Series(np.arange(1, len(df) + 1), index=df.index)
-        xcol = "episode index"
-
-    valid = pd.DataFrame({"episode": x, "return": y}).dropna()
-    if valid.empty:
-        return
-
-    valid = valid.sort_values("episode")
-    valid["moving_avg"] = valid["return"].rolling(
-        SMOOTH_WINDOW, min_periods=1
-    ).mean()
-
-    fig, ax = plt.subplots()
-    ax.plot(valid["episode"], valid["return"], alpha=0.3,
-            linewidth=1, label="Episode return")
-    ax.plot(valid["episode"], valid["moving_avg"], linewidth=2.2,
-            label=f"{SMOOTH_WINDOW}-episode moving average")
-    ax.set_title("1. DQN Training Return")
-    ax.set_xlabel("Training episode")
-    ax.set_ylabel("Episode return")
+def fig_val(val, out):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    best = val[val.is_best == 1].iloc[-1] if (val.is_best == 1).any() else None
+    ax = axes[0]
+    ax.plot(val.episode, val.val_return, "-o", color=C["val"], ms=4, lw=1.8, label="Validation return")
+    if best is not None:
+        ax.scatter([best.episode], [best.val_return], s=120, color=C["best"], zorder=5, label=f"best.pt (ep {int(best.episode)})")
+    ax.axhline(0, color="k", lw=0.6, alpha=0.5)
+    ax.set(xlabel="Training episode", ylabel="Mean return on validation episodes", title="3a. Validation return (selection criterion)")
     ax.legend()
-    save_figure(fig, "01_training_return.png")
-
-
-def plot_training_tir():
-    df = read_csv(RUN_DIR / "train_log.csv")
-    if df is None:
-        return
-
-    x, _ = get_metric(df, "episode")
-    y, ycol = maybe_convert_metric(df, "tir")
-
-    if y is None:
-        print("[SKIP] Graph 2: no recognised training TIR column.")
-        return
-
-    if x is None:
-        x = pd.Series(np.arange(1, len(df) + 1), index=df.index)
-
-    valid = pd.DataFrame({"episode": x, "tir": y}).dropna()
-    valid = valid.sort_values("episode")
-    valid["moving_avg"] = valid["tir"].rolling(
-        SMOOTH_WINDOW, min_periods=1
-    ).mean()
-
-    fig, ax = plt.subplots()
-    ax.plot(valid["episode"], valid["tir"], alpha=0.3,
-            linewidth=1, label="Episode TIR")
-    ax.plot(valid["episode"], valid["moving_avg"], linewidth=2.2,
-            label=f"{SMOOTH_WINDOW}-episode moving average")
-    ax.set_title("2. DQN Training Time in Range")
-    ax.set_xlabel("Training episode")
-    ax.set_ylabel("TIR (%)")
-    ax.set_ylim(bottom=0)
+    ax = axes[1]
+    ax.plot(val.episode, val.val_tir, "-o", color=C["in"], ms=4, lw=1.8, label="TIR 70–180")
+    ax.plot(val.episode, val.val_tbr_lt70, "-s", color=C["low"], ms=4, lw=1.8, label="TBR < 70")
+    ax.plot(val.episode, val.val_tbr_lt54, "-^", color=C["sev_low"], ms=4, lw=1.8, label="TBR < 54")
+    if best is not None:
+        ax.axvline(best.episode, color=C["best"], ls="--", lw=1.2)
+    ax.set(xlabel="Training episode", ylabel="% of episode time", ylim=(0, 100), title="3b. Validation glycaemic metrics")
     ax.legend()
-    save_figure(fig, "02_training_tir.png")
+    fig.text(0.01, -0.03, "Fixed validation patients and seeds at every evaluation (identical episodes), so points are comparable.", fontsize=8, color="#555")
+    save(fig, out, "03_validation.png")
 
 
-def plot_validation_curve():
-    df = read_csv(RUN_DIR / "val_log.csv")
-    if df is None:
-        return
-
-    x, _ = get_metric(df, "episode")
-    tir, _ = maybe_convert_metric(df, "tir")
-    ret, _ = get_metric(df, "return")
-
-    if x is None:
-        print("[SKIP] Graph 3: no recognised validation episode column.")
-        return
-
-    if tir is None and ret is None:
-        print("[SKIP] Graph 3: validation TIR/return columns not found.")
-        return
-
-    fig, ax1 = plt.subplots()
-    if tir is not None:
-        data = pd.DataFrame({"x": x, "tir": tir}).dropna()
-        ax1.plot(data["x"], data["tir"], marker="o",
-                 linewidth=2, label="Validation TIR")
-        ax1.set_ylabel("TIR (%)")
-        ax1.set_ylim(bottom=0)
-
-    if ret is not None:
-        data = pd.DataFrame({"x": x, "ret": ret}).dropna()
-        ax2 = ax1.twinx()
-        ax2.plot(data["x"], data["ret"], marker="s",
-                 linestyle="--", linewidth=1.8,
-                 label="Validation return")
-        ax2.set_ylabel("Validation return")
-
-    ax1.set_title("3. Validation Performance During Training")
-    ax1.set_xlabel("Training episode")
-
-    lines = ax1.get_lines()
-    labels = [line.get_label() for line in lines]
-    if "ax2" in locals():
-        lines2 = ax2.get_lines()
-        lines += lines2
-        labels += [line.get_label() for line in lines2]
-    if lines:
-        ax1.legend(lines, labels, loc="best")
-
-    save_figure(fig, "03_validation_performance.png")
-
-
-def plot_training_loss():
-    df = read_csv(RUN_DIR / "train_log.csv")
-    if df is None:
-        return
-
-    x, _ = get_metric(df, "episode")
-    loss, losscol = get_metric(df, "loss")
-
-    if loss is None:
-        print(
-            "[SKIP] Graph 4: no recognised loss column in train_log.csv. "
-            "The training log may not save loss; we won't invent it."
-        )
-        return
-
-    if x is None:
-        x = pd.Series(np.arange(1, len(df) + 1), index=df.index)
-
-    valid = pd.DataFrame({"episode": x, "loss": loss}).dropna()
-    valid = valid.sort_values("episode")
-
-    fig, ax = plt.subplots()
-    ax.plot(valid["episode"], valid["loss"], alpha=0.45,
-            linewidth=1, label="Logged loss")
-
-    smooth = valid["loss"].rolling(SMOOTH_WINDOW, min_periods=1).mean()
-    ax.plot(valid["episode"], smooth, linewidth=2,
-            label=f"{SMOOTH_WINDOW}-point moving average")
-
-    ax.set_title("4. DQN Training Loss")
-    ax.set_xlabel("Training episode / logged step")
-    ax.set_ylabel("Loss")
+def fig_loss(train, out, w):
+    d = train.dropna(subset=["mean_loss"])
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(d.episode, d.mean_loss, color=C["line"], lw=0.8, alpha=0.4, label="Per-episode mean Huber loss")
+    ax.plot(d.episode, moving_avg(d.mean_loss, w), color=C["ma"], lw=2.2, label=f"{w}-episode moving average")
+    ax.set(xlabel="Training episode", ylabel="Huber loss", title="4. DQN training loss")
     ax.legend()
-    save_figure(fig, "04_training_loss.png")
+    fig.text(0.01, -0.06, "DQN loss tracks the magnitude of Q-values, which grows as returns improve and the target network\n"
+                          "moves; it is not expected to decrease monotonically. Checkpoint selection uses validation return.",
+             fontsize=8, color="#555")
+    save(fig, out, "04_training_loss.png")
 
 
-# ============================================================
-# EVALUATION SUMMARY NORMALISATION
-# ============================================================
-
-def load_evaluation_summary(folder):
-    """
-    Read summary.csv. If the expected policy/metric columns aren't
-    recognised, print the columns so aliases can be adjusted.
-    """
-    df = read_csv(folder / "summary.csv")
-    if df is None:
-        return None
-
-    policy_col = get_policy_column(df)
-    if policy_col is None:
-        print("[SKIP] No recognisable policy/label column in summary.csv.")
-        return None
-
-    df = df.copy()
-    df["policy_std"] = df[policy_col].map(clean_policy)
-
-    mapping = {}
-    for metric in ["tir", "tbr70", "tbr54", "tar180", "tar250",
-                   "return", "early_termination"]:
-        values, original_col = maybe_convert_metric(df, metric)
-        if values is not None:
-            df[metric] = values
-            mapping[metric] = original_col
-
-    if not mapping:
-        print("[SKIP] No recognised metrics in summary.csv.")
-        return None
-
-    print("       Recognised evaluation metrics:", mapping)
-    return df
+# ---------------------------------------------------------------- 5-10: evaluation
+def bar_metric(summary, episodes, key, title, ylabel, out, name, dqn_label, color, better="higher", ref=None):
+    pols = order_policies(list(summary.policy), dqn_label)
+    s = summary.set_index("policy").loc[pols]
+    mean, lo, hi = s[f"{key}_mean"].values, s[f"{key}_ci_lo"].values, s[f"{key}_ci_hi"].values
+    fig, ax = plt.subplots(figsize=(max(8, 1.4 * len(pols)), 4.2))
+    x = np.arange(len(pols))
+    cols = bar_colors(pols, dqn_label)
+    cols = [color if c == C["line"] else c for c in cols]
+    ax.bar(x, mean, color=cols, width=0.62, zorder=2)
+    ax.errorbar(x, mean, yerr=[mean - lo, hi - mean], fmt="none", ecolor="k", elinewidth=1, capsize=4, zorder=3)
+    # per-episode points
+    for i, p in enumerate(pols):
+        v = episodes.loc[episodes.policy == p, key].values
+        ax.scatter(np.full(v.size, x[i]) + np.random.default_rng(0).uniform(-0.18, 0.18, v.size), v,
+                   s=10, color="k", alpha=0.35, zorder=4)
+    for i, m in enumerate(mean):
+        ax.text(x[i], hi[i] + 0.8, f"{m:.1f}", ha="center", va="bottom", fontsize=8.5)
+    if ref is not None:
+        ax.axhline(ref[0], color=C["grey"], ls="--", lw=1)
+        ax.text(len(pols) - 0.5, ref[0], f" {ref[1]}", va="bottom", ha="right", fontsize=8, color="#555")
+    ax.set_xticks(x, [nice(p) for p in pols], fontsize=8.5)
+    ax.set(ylabel=ylabel, title=title)
+    ax.set_ylim(0, max(hi.max() * 1.18, 5))
+    ax.grid(axis="x", visible=False)
+    n = int(s.n_episodes.iloc[0])
+    fig.text(0.01, -0.03, f"Bars: mean over {n} held-out test episodes per policy; whiskers: 95% bootstrap CI; dots: individual episodes. "
+                          f"{'Higher' if better == 'higher' else 'Lower'} is better.", fontsize=8, color="#555")
+    save(fig, out, name)
 
 
-def plot_policy_metric(df, metric, title, ylabel, filename):
-    if df is None or metric not in df.columns:
-        print(f"[SKIP] {filename}: metric '{metric}' not available.")
-        return
-
-    data = df[df["policy_std"].isin(POLICIES)].copy()
-    data = data.dropna(subset=[metric])
-
-    if data.empty:
-        print(f"[SKIP] {filename}: none of the requested policies found.")
-        print("       Policy values found:", sorted(df["policy_std"].unique()))
-        return
-
-    # If there are duplicate rows per policy, retain the provided summary
-    # rows as-is rather than silently averaging different groups.
-    labels = data["policy_std"].tolist()
-    values = data[metric].tolist()
-
-    fig, ax = plt.subplots()
-    bars = ax.bar(labels, values)
-    ax.set_title(title)
-    ax.set_ylabel(ylabel)
-    ax.tick_params(axis="x", rotation=15)
-    ax.set_ylim(bottom=0)
-
-    for bar, value in zip(bars, values):
-        ax.annotate(
-            f"{value:.1f}",
-            (bar.get_x() + bar.get_width() / 2, bar.get_height()),
-            xytext=(0, 4), textcoords="offset points",
-            ha="center", va="bottom", fontsize=9,
-        )
-
-    save_figure(fig, filename)
+def fig_distribution(summary, out, dqn_label):
+    pols = order_policies(list(summary.policy), dqn_label)
+    s = summary.set_index("policy").loc[pols]
+    sev_low, low, inr = s.tbr_lt54_mean, s.tbr_lt70_mean - s.tbr_lt54_mean, s.tir_70_180_mean
+    high, very_high = s.tar_gt180_mean - s.tar_gt250_mean, s.tar_gt250_mean
+    fig, ax = plt.subplots(figsize=(9, 4.4))
+    y = np.arange(len(pols))
+    left = np.zeros(len(pols))
+    for vals, col, lab in [(sev_low, C["sev_low"], "< 54 (severe low)"), (low, C["low"], "54–70 (low)"),
+                           (inr, C["in"], "70–180 (in range)"), (high, C["high"], "180–250 (high)"),
+                           (very_high, C["very_high"], "> 250 (very high)")]:
+        ax.barh(y, vals.values, left=left, color=col, height=0.62, label=lab, zorder=2)
+        for i, v in enumerate(vals.values):
+            if v >= 6:
+                ax.text(left[i] + v / 2, y[i], f"{v:.0f}%", ha="center", va="center", fontsize=8,
+                        color="white", fontweight="bold")
+        left += vals.values
+    ax.set_yticks(y, [nice(p).replace("\n", " ") for p in pols])
+    ax.invert_yaxis()
+    ax.set(xlim=(0, 100), xlabel="% of episode time (mean over held-out test episodes)",
+           title="10. Glucose range distribution per policy")
+    ax.grid(axis="y", visible=False)
+    ax.legend(ncol=5, loc="upper center", bbox_to_anchor=(0.5, -0.16))
+    save(fig, out, "10_range_distribution.png")
 
 
-def plot_glucose_range_stacked(df, filename):
-    if df is None:
-        return
+def summary_table(summary, out, dqn_label):
+    pols = order_policies(list(summary.policy), dqn_label)
+    s = summary.set_index("policy").loc[pols]
+    rows = ["| Policy | n | TIR 70–180 % | TBR <70 % | TBR <54 % | TAR >180 % | TAR >250 % | Mean BG | LBGI | HBGI | Terminated |",
+            "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for p, r in s.iterrows():
+        c = lambda k, d=1: f"{r[k + '_mean']:.{d}f} [{r[k + '_ci_lo']:.{d}f}, {r[k + '_ci_hi']:.{d}f}]"
+        rows.append(f"| {p} | {int(r.n_episodes)} | {c('tir_70_180')} | {c('tbr_lt70')} | {c('tbr_lt54')} | {c('tar_gt180')} | "
+                    f"{c('tar_gt250')} | {c('mean_bg', 0)} | {c('lbgi', 2)} | {c('hbgi', 2)} | {r.terminated_early_mean:.2f} |")
+    rows.append("\nmean [95% bootstrap CI over episodes]. Research simulation only; simulated results do not imply clinical performance.")
+    with open(os.path.join(out, "summary_table.md"), "w") as f:
+        f.write("\n".join(rows))
+    print("wrote", os.path.join(out, "summary_table.md"))
 
-    needed = ["tir", "tbr70", "tar180"]
-    if not all(m in df.columns for m in needed):
-        print(
-            f"[SKIP] {filename}: requires TIR, TBR<70 and TAR>180 "
-            "columns in summary.csv."
-        )
-        return
-
-    data = df[df["policy_std"].isin(POLICIES)].copy()
-    data = data.dropna(subset=needed)
-
-    if data.empty:
-        print(f"[SKIP] {filename}: no requested policies found.")
-        return
-
-    # These three ranges are mutually exclusive when calculated from
-    # the same glucose samples and conventionally should sum to ~100%.
-    fig, ax = plt.subplots()
-    bottom = np.zeros(len(data))
-
-    components = [
-        ("tbr70", "TBR: <70 mg/dL"),
-        ("tir", "TIR: 70–180 mg/dL"),
-        ("tar180", "TAR: >180 mg/dL"),
-    ]
-
-    for metric, label in components:
-        vals = data[metric].to_numpy(dtype=float)
-        ax.bar(data["policy_std"], vals, bottom=bottom, label=label)
-        bottom += vals
-
-    ax.set_title("10. Glucose-Range Distribution by Policy")
-    ax.set_ylabel("Time (%)")
-    ax.set_ylim(0, 100)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3)
-    ax.tick_params(axis="x", rotation=15)
-
-    # Warn if percentages do not add to approximately 100.
-    totals = data[needed].sum(axis=1)
-    for policy, total in zip(data["policy_std"], totals):
-        if abs(total - 100) > 3:
-            warnings.warn(
-                f"{policy}: TBR70 + TIR + TAR180 = {total:.1f}%, "
-                "not approximately 100%. Verify metric definitions."
-            )
-
-    save_figure(fig, filename)
-
-
-def plot_evaluation_graphs(folder, split_label):
-    df = load_evaluation_summary(folder)
-    if df is None:
-        return
-
-    prefix = f"{split_label}_"
-
-    # Graph 5: TIR
-    plot_policy_metric(
-        df, "tir",
-        f"5. TIR Comparison — {split_label.title()}",
-        "Time in range (%)",
-        prefix + "05_tir_comparison.png",
-    )
-
-    # Graph 6: TAR >180
-    plot_policy_metric(
-        df, "tar180",
-        f"6. TAR Comparison (>180 mg/dL) — {split_label.title()}",
-        "Time above 180 mg/dL (%)",
-        prefix + "06_tar_comparison.png",
-    )
-
-    # Graph 7: TBR <70
-    plot_policy_metric(
-        df, "tbr70",
-        f"7. TBR Comparison (<70 mg/dL) — {split_label.title()}",
-        "Time below 70 mg/dL (%)",
-        prefix + "07_tbr_comparison.png",
-    )
-
-    # Graph 8: severe hypoglycemia <54
-    plot_policy_metric(
-        df, "tbr54",
-        f"8. Severe Hypoglycemia (<54 mg/dL) — {split_label.title()}",
-        "Time below 54 mg/dL (%)",
-        prefix + "08_severe_hypoglycemia.png",
-    )
-
-    # Graph 9: severe hyperglycemia >250
-    plot_policy_metric(
-        df, "tar250",
-        f"9. Severe Hyperglycemia (>250 mg/dL) — {split_label.title()}",
-        "Time above 250 mg/dL (%)",
-        prefix + "09_severe_hyperglycemia.png",
-    )
-
-    # Graph 10: combined glucose ranges
-    plot_glucose_range_stacked(df, prefix + "10_glucose_range_distribution.png")
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
-    print("=" * 65)
-    print("GlucoGuard AI — research plotting script")
-    print("Project root:", ROOT)
-    print("Graph output:", OUT_DIR)
-    print("=" * 65)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", required=True, help="runs/<name> containing train_log.csv and val_log.csv")
+    ap.add_argument("--eval", required=True, help="directory with evaluate.py output (summary.csv, episodes.csv)")
+    ap.add_argument("--out", default="figures")
+    ap.add_argument("--window", type=int, default=15, help="moving-average window in episodes")
+    ap.add_argument("--dqn-label", default=None, help="policy label of the headline DQN checkpoint in summary.csv")
+    args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
 
-    # Training graphs 1–4
-    plot_training_return()
-    plot_training_tir()
-    plot_validation_curve()
-    plot_training_loss()
+    train = pd.read_csv(os.path.join(args.run, "train_log.csv"))
+    val = pd.read_csv(os.path.join(args.run, "val_log.csv"))
+    summary = pd.read_csv(os.path.join(args.eval, "summary.csv"))
+    episodes = pd.read_csv(os.path.join(args.eval, "episodes.csv"))
+    dqn_label = args.dqn_label
+    if dqn_label is None:
+        dqn = [p for p in summary.policy if p not in POLICY_ORDER]
+        bests = [p for p in dqn if "best" in p]
+        dqn_label = bests[-1] if bests else (dqn[-1] if dqn else None)
+    print("headline DQN policy:", dqn_label)
 
-    # Evaluation graphs 5–10 for validation and test separately
-    plot_evaluation_graphs(VAL_DIR, "validation")
-    plot_evaluation_graphs(TEST_DIR, "test")
-
-    print("\nFinished.")
-    print("Check the PNGs in:", OUT_DIR)
-    print(
-        "\nIf a graph was skipped, read the [SKIP] message above. "
-        "Column names vary between project versions; use the printed "
-        "CSV columns to update the aliases instead of guessing values."
-    )
+    fig_return(train, args.out, args.window)
+    fig_train_tir(train, args.out, args.window)
+    fig_val(val, args.out)
+    fig_loss(train, args.out, args.window)
+    bar_metric(summary, episodes, "tir_70_180", "5. Time in range 70–180 mg/dL", "TIR (%)", args.out,
+               "05_tir_comparison.png", dqn_label, C["in"], "higher", ref=(70, "consensus target ≥ 70%"))
+    bar_metric(summary, episodes, "tar_gt180", "6. Time above range > 180 mg/dL", "TAR > 180 (%)", args.out,
+               "06_tar_comparison.png", dqn_label, C["high"], "lower", ref=(25, "consensus target < 25%"))
+    bar_metric(summary, episodes, "tbr_lt70", "7. Time below range < 70 mg/dL", "TBR < 70 (%)", args.out,
+               "07_tbr_comparison.png", dqn_label, C["low"], "lower", ref=(4, "consensus target < 4%"))
+    bar_metric(summary, episodes, "tbr_lt54", "8. Severe hypoglycaemia: time < 54 mg/dL", "TBR < 54 (%)", args.out,
+               "08_severe_hypo_comparison.png", dqn_label, C["sev_low"], "lower", ref=(1, "consensus target < 1%"))
+    bar_metric(summary, episodes, "tar_gt250", "9. Severe hyperglycaemia: time > 250 mg/dL", "TAR > 250 (%)", args.out,
+               "09_severe_hyper_comparison.png", dqn_label, C["very_high"], "lower", ref=(5, "consensus target < 5%"))
+    fig_distribution(summary, args.out, dqn_label)
+    summary_table(summary, args.out, dqn_label)
 
 
 if __name__ == "__main__":
