@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, waitForJob } from '../api/client'
 import type { Checkpoint, ResultSet, Run, SummaryRow } from '../api/types'
 import { useResults, useRuns } from '../hooks/useCatalog'
-import { fmt, seriesColor } from '../lib/format'
+import { fmt, PRIVILEGED, seriesColor } from '../lib/format'
 import { Card, Collapsible, Drawer, Empty, ErrorState, Loading, SplitBadge, Tabs } from '../components/ui'
 import { RangeBars } from '../components/charts/RangeBars'
 
@@ -204,9 +204,10 @@ function ResultTable({ set, onOpen }: { set: ResultSet; onOpen: (policy: string)
     const out: Record<string, string> = {}
     for (const m of METRICS) {
       if (m.noBest) continue
-      const vals = set.summary.map((r) => Number(r[`${m.k}_mean`]))
+      const fair = set.summary.filter((r) => !PRIVILEGED.has(r.policy))
+      const vals = fair.map((r) => Number(r[`${m.k}_mean`]))
       const idx = vals.indexOf(m.lowerBetter ? Math.min(...vals) : Math.max(...vals))
-      if (idx >= 0) out[m.k] = set.summary[idx].policy
+      if (idx >= 0) out[m.k] = fair[idx].policy
     }
     return out
   }, [set])
@@ -214,7 +215,7 @@ function ResultTable({ set, onOpen }: { set: ResultSet; onOpen: (policy: string)
     <div className="mb-6 last:mb-0">
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <span className="font-medium text-[13px]">{set.name}</span><SplitBadge split={set.split} />{set.name.includes('demo') && <span className="badge" style={{ height: 17, fontSize: 10 }}>demo</span>}
-        <span className="text-[11.5px] text-fg-3">{set.policies.length} policies · {set.episodes.length} episodes · {fmt.ago(set.modified)}</span>
+        <span className="text-[11.5px] text-fg-3">{set.policies.length} policies · {set.episodes.length} episodes · {fmt.ago(set.modified)} · <span className="mono">{set.dir}</span></span>
         {set.meta.command != null && <span className="text-[11px] text-fg-4 mono truncate max-w-md" title={String((set.meta.command as string[]).join(' '))}>{(set.meta.command as string[]).slice(2).join(' ')}</span>}
       </div>
       <div className="overflow-auto rounded-md border border-line">
@@ -223,7 +224,7 @@ function ResultTable({ set, onOpen }: { set: ResultSet; onOpen: (policy: string)
           <tbody>
             {set.summary.map((r) => (
               <tr key={r.policy} tabIndex={0} className="cursor-pointer" onClick={() => onOpen(r.policy)} onKeyDown={(e) => { if (e.key === 'Enter') onOpen(r.policy) }}>
-                <td className="font-medium">{r.policy}</td><td className="num text-fg-3">{r.n_episodes}</td>
+                <td className="font-medium">{r.policy}{PRIVILEGED.has(r.policy) && <span className="badge ml-1.5" style={{ height: 16, fontSize: 10 }} title="Uses announced meal grams and patient CR/CF; the DQN never sees these">privileged</span>}{set.checkpoint_runs?.[r.policy] && <span className="block text-[10.5px] text-fg-4 font-normal">{set.checkpoint_runs[r.policy]}</span>}</td><td className="num text-fg-3">{r.n_episodes}</td>
                 {METRICS.map((m) => <MetricCell key={m.k} r={r} m={m} best={best[m.k] === r.policy} />)}
               </tr>
             ))}
@@ -282,7 +283,10 @@ function CompareTab() {
   const findRow = (run: Run | undefined, split: string): { set: ResultSet; row: SummaryRow } | null => {
     if (!run) return null
     for (const s of sets.filter((s) => s.split === split).sort((x, y) => y.modified - x.modified)) {
-      const row = s.summary.find((r) => r.policy === `${run.name}_best` || r.policy.startsWith(run.name))
+      // prefer the val-selected checkpoint (best.pt); fall back to any label the backend mapped to this run
+      const mapped = Object.entries(s.checkpoint_runs ?? {}).filter(([, rn]) => rn === run.name).map(([p]) => p)
+      const label = mapped.find((p) => p.includes('best')) ?? mapped[0]
+      const row = label ? s.summary.find((r) => r.policy === label) : undefined
       if (row) return { set: s, row }
     }
     return null
@@ -317,11 +321,11 @@ function CompareTab() {
                   const v = Number(f.row[`${m.k}_mean`]); return m.pct ? fmt.pct(v, m.d) : v.toFixed(m.d)
                 })} />
               ))}
-              <Row label="Test result set" stage="held-out test" vals={cols.map((r) => findRow(r, 'test')?.set.name ?? '—')} />
+              <Row label="Test result set · label" stage="held-out test" vals={cols.map((r) => { const f = findRow(r, 'test'); return f ? `${f.set.name} · ${f.row.policy}` : '—' })} />
             </tbody>
           </table>
         </div>
-        <p className="text-[11.5px] text-fg-4 mt-3">Test rows match the policy label <span className="mono">&lt;run&gt;_best</span> in the newest test result set. If a run shows "not evaluated", launch an evaluation on the Results tab with that run's best.pt.</p>
+        <p className="text-[11.5px] text-fg-4 mt-3">Test rows use the newest held-out test result set whose policy label maps to the run (<span className="mono">&lt;run&gt;_best</span>, or a label ending in the run's episode count such as <span className="mono">best_300</span>). If a run shows "not evaluated", launch an evaluation on the Results tab with that run's best.pt.</p>
       </Card>
     </div>
   )

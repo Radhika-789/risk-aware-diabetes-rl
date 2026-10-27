@@ -1,5 +1,7 @@
-"""Read-only view over training runs (runs/<name>/) and evaluation outputs (results*/ dirs).
+"""Read-only view over training runs (runs/<name>/) and evaluation outputs.
 
+Evaluation directories are found in two places: results*/ at the repo root, and any runs/<name>/ that contains
+summary.csv but no train_log.csv (e.g. runs/eval_300_test_both written with --out runs/eval_...).
 Everything reported here is read from files written by train_dqn.py / evaluate.py. Nothing is synthesized.
 """
 from __future__ import annotations
@@ -51,10 +53,22 @@ def checkpoint_meta(path: str) -> dict:
     return meta
 
 
+def _is_eval_dir(d: str) -> bool:
+    return os.path.isdir(d) and os.path.exists(os.path.join(d, "summary.csv")) \
+        and not os.path.exists(os.path.join(d, "train_log.csv"))
+
+
+def _is_run_dir(d: str) -> bool:
+    return os.path.isdir(d) and (os.path.exists(os.path.join(d, "config.json"))
+                                 or os.path.exists(os.path.join(d, "train_log.csv")))
+
+
 def list_runs() -> list[dict]:
     runs = []
-    for cfg_path in sorted(glob.glob(os.path.join(RUNS_DIR, "*", "config.json"))):
-        run_dir = os.path.dirname(cfg_path)
+    for run_dir in sorted(glob.glob(os.path.join(RUNS_DIR, "*"))):
+        if not _is_run_dir(run_dir):
+            continue
+        cfg_path = os.path.join(run_dir, "config.json")
         name = os.path.basename(run_dir)
         try:
             with open(cfg_path) as f:
@@ -92,10 +106,30 @@ def run_logs(name: str) -> dict:
             "val": _read_csv(os.path.join(run_dir, "val_log.csv"))}
 
 
+def _infer_checkpoint_labels(summary_rows, runs_names):
+    """Map evaluate.py policy labels back to runs when the label does not follow <run>_<file> (e.g. best_300)."""
+    out = {}
+    for r in summary_rows:
+        pol = str(r.get("policy", ""))
+        for run in runs_names:
+            if pol.startswith(run + "_"):
+                out[pol] = run
+                break
+        else:
+            for run in runs_names:
+                tail = run.rsplit("_", 1)[-1]          # dqn_risk_s0_300 -> "300" matches best_300 / final_300
+                if tail and (pol.endswith("_" + tail) or pol == tail) and ("best" in pol or "final" in pol):
+                    out[pol] = run
+                    break
+    return out
+
+
 def list_results() -> list[dict]:
-    """Every directory matching results*/ containing summary.csv (written by evaluate.py)."""
+    """Evaluation directories: results*/ at the root plus runs/<name>/ holding summary.csv but no training log."""
+    run_names = [os.path.basename(d) for d in glob.glob(os.path.join(RUNS_DIR, "*")) if _is_run_dir(d)]
+    dirs = sorted(glob.glob(RESULTS_GLOB)) + sorted(d for d in glob.glob(os.path.join(RUNS_DIR, "*")) if _is_eval_dir(d))
     out = []
-    for d in sorted(glob.glob(RESULTS_GLOB)):
+    for d in dirs:
         s = os.path.join(d, "summary.csv")
         if not os.path.isdir(d) or not os.path.exists(s):
             continue
@@ -118,5 +152,6 @@ def list_results() -> list[dict]:
             split = split or "unknown"
         out.append({"name": os.path.basename(d), "dir": d, "split": split, "meta": meta,
                     "policies": [r["policy"] for r in summary], "summary": summary, "episodes": episodes,
+                    "checkpoint_runs": _infer_checkpoint_labels(summary, run_names),
                     "modified": os.path.getmtime(s)})
     return out

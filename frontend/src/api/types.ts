@@ -214,5 +214,7 @@ export interface ResultSet {
   policies: string[]
   summary: SummaryRow[]
   episodes: EpisodeRow[]
+  /** evaluate.py policy label -> training run name, inferred by the backend (e.g. best_300 -> dqn_risk_s0_300) */
+  checkpoint_runs: Record<string, string>
   modified: number
 }

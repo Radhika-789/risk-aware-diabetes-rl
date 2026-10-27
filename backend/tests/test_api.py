@@ -109,10 +109,26 @@ def test_registry_endpoints_do_not_crash_without_runs():
     assert client.get("/api/runs/nothing/logs").status_code == 404
 
 
-@pytest.mark.skipif(not __import__("os").path.exists("runs/demo_20ep/best.pt"), reason="demo checkpoint not trained")
+import glob as _glob
+_CKPT = sorted(_glob.glob("runs/*/best.pt"))
+
+
+@pytest.mark.skipif(not _CKPT, reason="no checkpoint in runs/")
 def test_checkpoint_session_locks_obs_fields():
-    s = client.post("/api/sessions", json={"policy": "ckpt:demo_20ep/best.pt",
+    run = _CKPT[0].split("/")[1]
+    s = client.post("/api/sessions", json={"policy": f"ckpt:{run}/best.pt",
                                            "settings": {**SHORT, "history_len": 3}}).json()
     assert s["settings"]["history_len"] == 8 and "history_len" in s["locked_fields"]
     s = client.post(f"/api/sessions/{s['id']}/step").json()
     assert len(s["last_decision"]["q_values"]) == 16
+
+
+def test_registry_finds_eval_dirs_under_runs_and_maps_labels():
+    res = client.get("/api/results").json()["results"]
+    runs = client.get("/api/runs").json()["runs"]
+    assert all("checkpoint_runs" in r and r["split"] in ("test", "val", "train", "unknown") for r in res)
+    # an eval directory must never be listed as a training run
+    assert not any(r["name"].startswith("eval_") for r in runs)
+    for r in res:
+        for pol, run in r["checkpoint_runs"].items():
+            assert pol in r["policies"] and run in {x["name"] for x in runs}

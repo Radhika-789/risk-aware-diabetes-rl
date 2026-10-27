@@ -29,8 +29,12 @@ export const fmt = {
 /** Human label for a policy id. */
 export function policyLabel(id: string): string {
   if (id.startsWith('ckpt:')) return id.slice(5).replace('.pt', '')
+  if (id === 'announced_bb') return 'announced BB (privileged)'
   return id.replace('_', ' ')
 }
+
+/** Policies that use information the DQN never sees; shown as an upper reference, not a fair competitor. */
+export const PRIVILEGED = new Set(['announced_bb'])
 
 export const THRESH = { severeLow: 54, low: 70, high: 180, veryHigh: 250 }
 

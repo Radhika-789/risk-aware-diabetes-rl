@@ -5,7 +5,7 @@ Vite + React 19 + TypeScript, react-router, Recharts, TanStack Query, Tailwind v
 ## Run
 
 ```bash
-# 1. API (repo root)
+# 1. API (repo root; backend/ must sit at the repo root, next to t1d_env.py)
 pip install -r requirements.txt fastapi "uvicorn[standard]"
 uvicorn backend.app:app --reload --port 8000
 
@@ -25,6 +25,7 @@ python -m pytest backend/tests -q             # API
 python frontend/e2e/ui_smoke.py               # headless Chromium against the built UI (needs playwright)
 ```
 
-Nothing in the UI is synthesized: every glucose value, action, metric and curve comes from a completed SimGlucose
+Evaluation directories are picked up from results*/ at the root and from runs/eval_*/ (any runs/ folder with summary.csv
+and no train_log.csv). Nothing in the UI is synthesized: every glucose value, action, metric and curve comes from a completed SimGlucose
 step or a file written by `train_dqn.py` / `evaluate.py`. Runs named `demo*` are short pipeline checks and are
 labelled as such.
