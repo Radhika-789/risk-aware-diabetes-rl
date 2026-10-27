@@ -12,18 +12,13 @@
 ![PyTorch](https://img.shields.io/badge/PyTorch-DQN-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
 ![Gymnasium](https://img.shields.io/badge/Gymnasium-POMDP-0081A5?style=for-the-badge)
 ![SimGlucose](https://img.shields.io/badge/SimGlucose-0.2.11-2A9D8F?style=for-the-badge)
-![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
-![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)
-![TypeScript](https://img.shields.io/badge/TypeScript-Frontend-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-8-646CFF?style=for-the-badge&logo=vite&logoColor=white)
-![Tailwind](https://img.shields.io/badge/Tailwind-4-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white)
 
 ![TIR](https://img.shields.io/badge/Time_in_Range-80.1%25-2A9D8F?style=flat-square)
 ![Early terminations](https://img.shields.io/badge/Early_terminations-0%25-2A9D8F?style=flat-square)
 ![Held-out patients](https://img.shields.io/badge/Held--out_test_patients-6-1F4E79?style=flat-square)
 ![Research only](https://img.shields.io/badge/Use-Research_simulation_only-D7263D?style=flat-square)
 
-**[Results](#-results)** · **[Frontend demo](#-frontend-demo)** · **[Install](#️-installation)** · **[Run](#️-execution-commands)** · **[Reproduce](#-reproducing-the-results)**
+**[Overview](#-highlights)** · **[Method](#-method-overview)** · **[Setup](#-installation)** · **[Run](#-execution-commands)** · **[Results](#-results)** · **[Reproduce](#-reproducing-the-results)**
 
 </div>
 
@@ -36,16 +31,16 @@
 ## 📑 Table of contents
 
 1. [✨ Highlights](#-highlights)
-2. [📊 Results](#-results)
-3. [🎬 Frontend demo](#-frontend-demo)
-4. [🗂️ Project structure](#️-project-structure)
-5. [📦 Dependencies](#-dependencies)
-6. [🛠️ Installation](#️-installation)
-7. [▶️ Execution commands](#️-execution-commands)
-8. [🔁 Reproducing the results](#-reproducing-the-results)
-9. [🧪 Testing](#-testing)
-10. [🧠 Method overview](#-method-overview)
-11. [⚖️ Scope and disclaimer](#️-scope-and-disclaimer)
+2. [🧠 Method overview](#-method-overview)
+3. [📁 Project structure](#-project-structure)
+4. [📦 Dependencies](#-dependencies)
+5. [🔧 Installation](#-installation)
+6. [✅ Verify the setup](#-verify-the-setup)
+7. [🚀 Execution commands](#-execution-commands)
+8. [📊 Results](#-results)
+9. [🔁 Reproducing the results](#-reproducing-the-results)
+10. [🎬 Web UI demo (optional)](#-web-ui-demo-optional)
+11. [📜 Scope and disclaimer](#-scope-and-disclaimer)
 
 ---
 
@@ -53,13 +48,186 @@
 
 | | Feature | What it means |
 |---|---|---|
-| 👁️ | **Partially observable (POMDP)** | The agent sees only the last 8 noisy CGM readings, an estimated insulin-on-board and time of day. True BG, patient parameters and meals are hidden. |
-| ⚖️ | **Risk-aware reward** | In-range is rewarded; hypoglycaemia is penalised far more than hyperglycaemia, with an extra penalty below 54 mg/dL. |
-| 🛡️ | **Safety shield** | Insulin is suspended when CGM < 80 mg/dL and boluses that would push estimated IOB too high are blocked. Hard dose caps always apply. |
-| 🧑‍🤝‍🧑 | **Unseen-patient evaluation** | 18 train / 6 validation / 6 test patients. Checkpoint chosen on validation; test patients are never touched in training. |
-| 🎯 | **Fair comparison** | Every policy runs the *identical* episodes (same patient, meals, sensor noise). Metrics carry 95% bootstrap CIs. |
+| 👁️ | **Partially observable (POMDP)** | The agent sees only recent noisy CGM readings, an estimated insulin-on-board and time of day. True blood glucose and meals are hidden. |
+| ⚖️ | **Risk-aware reward** | In-range is rewarded; low glucose is penalised far more than high glucose. |
+| 🛡️ | **Safety shield** | Insulin is suspended when glucose is low and unsafe boluses are blocked. |
+| 🧑‍🤝‍🧑 | **Unseen-patient evaluation** | 18 train / 6 validation / 6 test virtual patients. Test patients are never used in training. |
+| 🎯 | **Fair comparison** | All policies run the identical episodes (same patient, meals, sensor noise), with 95% bootstrap confidence intervals. |
 | 📏 | **Four baselines** | Random, fixed basal, CGM-only rule, and a privileged announced-meal basal-bolus reference. |
-| 🖥️ | **Research workstation UI** | Live simulation, analytics, experiments and configuration pages. Nothing is synthesised: every value comes from a real SimGlucose step or a file written by the scripts. |
+
+---
+
+## 🧠 Method overview
+
+**Problem.** Choose insulin doses for a Type 1 diabetes patient every 15 minutes to keep glucose in the safe 70-180 mg/dL range,
+while avoiding dangerous lows.
+
+```mermaid
+flowchart LR
+    P["🧑 Virtual patient<br/>(SimGlucose)"] -->|noisy CGM| O["👁️ Observation"]
+    O --> A["🤖 Double-DQN agent"]
+    A -->|basal + bolus| S["🛡️ Safety shield"]
+    S --> I["💉 Insulin pump"]
+    I --> P
+    P -.->|true glucose| R["🎁 Risk-aware reward"]
+    R -.-> A
+```
+
+| Component | Design |
+|---|---|
+| 🧬 **Environment** | SimGlucose virtual patients wrapped as a Gymnasium POMDP; one decision every 15 minutes, 1 simulated day per episode |
+| 👁️ **Observation** | Recent CGM history, estimated insulin-on-board, time of day |
+| 💉 **Actions** | 16 discrete choices: 4 basal levels × 4 bolus sizes, scaled to each patient |
+| 🎁 **Reward** | +1 in range, mild penalty for high glucose, strong penalty for low glucose (extra below 54 mg/dL) |
+| 🛡️ **Safety** | Shield suspends insulin on low CGM and blocks unsafe boluses; hard dose caps always on |
+| 🤖 **Agent** | Double-DQN with a small MLP Q-network, replay buffer and target network (custom PyTorch implementation) |
+| 🧑‍🤝‍🧑 **Data split** | 30 virtual patients: 18 train / 6 validation (checkpoint selection) / 6 test (final report) |
+| 📏 **Metrics** | Time in range (TIR), time below range (TBR), time above range (TAR), mean glucose, LBGI / HBGI, early-termination rate |
+
+**Baselines** (all use the same dose caps and shield as the DQN):
+
+- 🎲 `random`: random action (sanity floor).
+- 💉 `fixed_basal`: constant basal insulin, never boluses.
+- 📐 `cgm_rule`: simple hand-written rule using CGM only (a heuristic, not a clinical algorithm).
+- 🔒 `announced_bb`: basal-bolus using privileged information (announced meals). It is not a fair competitor; it shows what
+  meal knowledge buys.
+
+---
+
+## 📁 Project structure
+
+<details open>
+<summary><b>Click to collapse / expand</b></summary>
+
+```
+risk-aware-diabetes-rl/
+├── t1d_env.py                # Gymnasium POMDP environment around SimGlucose (observation, actions, reward, shield)
+├── dqn.py                    # Double-DQN agent
+├── train_dqn.py              # Training (train patients) with checkpoint selection (validation patients)
+├── evaluate.py               # Baselines vs trained agent on held-out patients
+├── baselines.py              # random, fixed_basal, cgm_rule, announced_bb
+├── rollout.py                # Episode runner / evaluation helpers
+├── metrics.py                # TIR, TBR, TAR, LBGI, HBGI, ...
+├── graphs.py                 # Generates the report figures and summary table
+├── smoke_test_simglucose.py  # Checks the SimGlucose installation
+├── test_wrapper.py           # Tests: environment, metrics, baselines, rollout
+├── test_dqn.py               # Tests: DQN and training loop
+├── requirements.txt
+├── runs/
+│   ├── dqn_risk_s0_300/      # config, training/validation logs, best.pt, final.pt
+│   ├── eval_300_test_both/   # headline test-set evaluation
+│   ├── eval_300_val/         # validation-set evaluation
+│   └── eval_300_val_original/
+├── graphs_results/           # Figures 01-10, traces.png, summary_table.md
+├── backend/ + frontend/      # Optional web UI for live simulation and analysis
+└── GlucoGuard_UI (2).mp4     # Web UI screen recording
+```
+
+</details>
+
+---
+
+## 📦 Dependencies
+
+| Package | Version | Purpose |
+|---|---|---|
+| `simglucose` | 0.2.11 | Type 1 diabetes patient simulator, CGM sensor, insulin pump |
+| `setuptools` | ≥ 77, < 81 | Needed by SimGlucose's legacy `gym` dependency (`pkg_resources`) |
+| `gymnasium` | 0.29.1 | Environment API |
+| `torch` | 2.14.1 | Deep Q-learning (CPU is enough) |
+| `numpy` / `pandas` / `scipy` | 2.5.4 / 3.0.6 / 1.18.1 | Numerics and data handling |
+| `matplotlib` | latest | Figures |
+| `pytest` | latest | Tests |
+| `fastapi`, `uvicorn[standard]`, `httpx` | latest | *Optional:* web UI backend |
+
+Everything is listed in [`requirements.txt`](requirements.txt). The project has been run on Python 3.13.
+The optional web UI additionally needs Node.js and npm.
+
+---
+
+## 🔧 Installation
+
+```bash
+git clone https://github.com/Radhika-789/risk-aware-diabetes-rl.git
+cd risk-aware-diabetes-rl
+```
+
+<table>
+<tr><th>🐧 Linux / 🍎 macOS</th><th>🪟 Windows (PowerShell)</th></tr>
+<tr><td>
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+</td><td>
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+</td></tr>
+</table>
+
+---
+
+## ✅ Verify the setup
+
+Run these from the repository root before training:
+
+```bash
+python smoke_test_simglucose.py        # simulator works
+python test_wrapper.py                 # environment, metrics, baselines (~1-2 min, no torch needed)
+python test_dqn.py                     # DQN and training loop (~1 min)
+```
+
+---
+
+## 🚀 Execution commands
+
+> [!NOTE]
+> All commands are run from the **repository root** with the virtual environment active. The workflow is
+> **train → evaluate → plot**.
+
+### 1️⃣ Train
+
+```bash
+# quick pipeline check (a few minutes)
+python train_dqn.py --episodes 12 --eval-every 6 --run-name quick
+
+# full run used for the reported results (300 episodes, seed 0)
+python train_dqn.py --episodes 300 --seed 0 --run-name dqn_risk_s0_300
+```
+
+Outputs go to `runs/<run-name>/`: training and validation logs, `best.pt` (best on validation), `final.pt`, `config.json`.
+
+Useful flags: `--reward-mode {risk,tir}`, `--no-shield`, `--no-double`, `--announce-meals`, `--lr`, `--gamma`.
+Run `python train_dqn.py --help` for all options.
+
+### 2️⃣ Evaluate
+
+```bash
+# baselines only (no torch needed)
+python evaluate.py --out results_baselines --episodes-per-patient 2
+
+# baselines + trained checkpoints on the held-out test patients
+python evaluate.py --split test --episodes-per-patient 5 \
+    --checkpoints runs/dqn_risk_s0_300/best.pt runs/dqn_risk_s0_300/final.pt \
+    --labels best_300 final_300 --out runs/eval_300_test_both --plot
+```
+
+Outputs: `episodes.csv`, `summary.csv`, `summary.md`, and `traces.png` (with `--plot`). `--split` accepts `test`, `val` or `train`.
+
+### 3️⃣ Generate figures
+
+```bash
+python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both \
+    --out graphs_results --dqn-label best_300
+```
 
 ---
 
@@ -98,226 +266,12 @@ with the 95% bootstrap CI for TIR. Full table: [`graphs_results/summary_table.md
 ![Validation curves](graphs_results/03_validation.png)
 
 #### 4️⃣ Same patient, same meals, every policy
-*True BG traces over 24 h with identical meals and sensor noise.*
+*True glucose traces over 24 h with identical meals and sensor noise.*
 
 ![Glucose traces](graphs_results/traces.png)
 
 More plots are in [`graphs_results/`](graphs_results/): training return, training TIR, training loss, and TAR / TBR / severe
 hypo / severe hyper comparisons.
-
----
-
-## 🎬 Frontend demo
-
-The **GlucoGuard research workstation** is a web UI to run live glucose simulations with any policy, compare policies side by
-side, explore analytics and experiment results, and inspect the model configuration.
-
-<div align="center">
-
-<!-- TODO: add screen recording (docs/demo.gif, or drag an .mp4 into the GitHub editor and paste the link here) -->
-![GlucoGuard live demo](docs/demo.gif)
-
-</div>
-
-| Page | Route | What you can do |
-|---|---|---|
-| 🔴 **Live Simulation** | `/` | Pick a patient and policy, then run, pause or step a simulated day and watch glucose, actions and decisions update live. Compare policies on the same episode. |
-| 📉 **Analytics Lab** | `/analytics` | Explore evaluation results across policies (time in range, time below / above range, per-episode metrics). |
-| 🧫 **Experiments** | `/experiments` | Browse training runs, learning curves and evaluations. |
-| ⚙️ **Configuration & Model** | `/config` | Inspect the environment settings and trained checkpoint details. |
-
----
-
-## 🗂️ Project structure
-
-<details open>
-<summary><b>Click to collapse / expand</b></summary>
-
-```
-risk-aware-diabetes-rl/
-├── t1d_env.py                # Gymnasium POMDP wrapper around SimGlucose (obs, actions, reward, shield, patient splits)
-├── dqn.py                    # Double-DQN agent (MLP Q-network, replay buffer, target network)
-├── train_dqn.py              # Training on train patients, checkpoint selection on validation patients
-├── evaluate.py               # Baselines vs checkpoints on held-out patients (CSV, Markdown, traces)
-├── baselines.py              # random, fixed_basal, cgm_rule, announced_bb
-├── rollout.py                # Episode runner / policy evaluation helpers
-├── metrics.py                # TIR, TBR, TAR, LBGI, HBGI, ...
-├── graphs.py                 # Generates the 10 report figures + summary table
-├── smoke_test_simglucose.py  # Verifies the SimGlucose installation
-├── test_wrapper.py           # Tests: environment, metrics, baselines, rollout (plain script)
-├── test_dqn.py               # Tests: DQN and training (plain script)
-├── requirements.txt
-├── backend/                  # FastAPI API (sessions, rollouts, evaluations, jobs) + backend/tests
-├── frontend/                 # Vite + React 19 + TypeScript UI (+ e2e/ui_smoke.py)
-├── runs/
-│   ├── dqn_risk_s0_300/      # config.json, train_log.csv, val_log.csv, best.pt, final.pt
-│   ├── eval_300_test_both/   # headline test-set evaluation
-│   ├── eval_300_val/         # validation-set evaluation
-│   └── eval_300_val_original/
-├── graphs_results/           # Figures 01-10, traces.png, summary_table.md
-└── docs/demo.gif             # Frontend screen recording
-```
-
-</details>
-
----
-
-## 📦 Dependencies
-
-### 🐍 Python
-
-| Package | Version | Purpose |
-|---|---|---|
-| `simglucose` | 0.2.11 | T1D patient simulator, CGM sensor, insulin pump |
-| `setuptools` | ≥ 77, < 81 | SimGlucose pulls in legacy `gym==0.9.4`, which needs `pkg_resources` |
-| `gymnasium` | 0.29.1 | Environment API |
-| `torch` | 2.14.1 | DQN (CPU is enough) |
-| `numpy` / `pandas` / `scipy` | 2.5.4 / 3.0.6 / 1.18.1 | Numerics and data handling |
-| `matplotlib` | latest | Figures |
-| `pytest`, `httpx` | latest | Backend API tests |
-| `fastapi`, `uvicorn[standard]` | latest | Backend server |
-| `playwright` *(optional)* | latest | Only for `frontend/e2e/ui_smoke.py` |
-
-All of the above except `playwright` are listed in [`requirements.txt`](requirements.txt). The project has been run on Python 3.13.
-
-### ⚛️ Frontend
-
-Node.js (a recent LTS release) and npm. React 19, React Router 7, Recharts 3, TanStack Query 5, Tailwind CSS 4, Vite 8,
-TypeScript, oxlint. All are pinned in `frontend/package.json`.
-
----
-
-## 🛠️ Installation
-
-```bash
-git clone https://github.com/Radhika-789/risk-aware-diabetes-rl.git
-cd risk-aware-diabetes-rl
-```
-
-### 1️⃣ Python environment
-
-<table>
-<tr><th>🐧 Linux / 🍎 macOS</th><th>🪟 Windows (PowerShell)</th></tr>
-<tr><td>
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-</td><td>
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-</td></tr>
-</table>
-
-### 2️⃣ Verify the simulator
-
-```bash
-python smoke_test_simglucose.py
-```
-
-### 3️⃣ Frontend (only needed for the UI)
-
-```bash
-cd frontend
-npm install
-cd ..
-```
-
----
-
-## ▶️ Execution commands
-
-> [!NOTE]
-> All commands are run from the **repository root** with the virtual environment active.
-
-### 🏋️ Train
-
-```bash
-# quick pipeline check (a few minutes)
-python train_dqn.py --episodes 12 --eval-every 6 --run-name quick
-
-# full run used for the reported results (300 episodes, seed 0)
-python train_dqn.py --episodes 300 --seed 0 --run-name dqn_risk_s0_300
-```
-
-Outputs go to `runs/<run-name>/`: `train_log.csv`, `val_log.csv`, `best.pt`, `final.pt`, `config.json`.
-
-Useful flags: `--reward-mode {risk,tir}`, `--no-shield`, `--no-double`, `--announce-meals`, `--history-len`, `--lr`, `--gamma`,
-`--eps-decay-frac`, `--eval-every`. Run `python train_dqn.py --help` for all options.
-
-### 🧮 Evaluate
-
-```bash
-# baselines only (no torch needed)
-python evaluate.py --out results_baselines --episodes-per-patient 2
-
-# baselines + trained checkpoints on the held-out test patients
-python evaluate.py --split test --episodes-per-patient 5 \
-    --checkpoints runs/dqn_risk_s0_300/best.pt runs/dqn_risk_s0_300/final.pt \
-    --labels best_300 final_300 --out runs/eval_300_test_both --plot
-```
-
-Outputs: `episodes.csv`, `summary.csv`, `summary.md`, and `traces.png` (with `--plot`). `--split` accepts `test`, `val` or `train`.
-
-### 🎨 Generate figures
-
-```bash
-python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both \
-    --out graphs_results --dqn-label best_300
-```
-
-### 🌐 Run the UI
-
-**Development mode (hot reload)**, in two terminals:
-
-```bash
-# terminal 1: API (repo root)
-uvicorn backend.app:app --reload --port 8000
-
-# terminal 2: UI
-cd frontend
-npm run dev            # http://localhost:5173  (/api is proxied to :8000)
-```
-
-**Single-process mode** (FastAPI serves the built UI):
-
-```bash
-cd frontend && npm run build && cd ..
-uvicorn backend.app:app --port 8000      # http://localhost:8000
-```
-
-> [!IMPORTANT]
-> **Showing the bundled evaluation results in the Analytics page.** The API looks for evaluation folders matching `results*` by
-> default, while this repo stores them under `runs/eval_*`. Point it there with an environment variable:
-
-```bash
-# Linux / macOS
-GG_RESULTS_GLOB="runs/eval_*" uvicorn backend.app:app --port 8000
-```
-
-```powershell
-# Windows (PowerShell)
-$env:GG_RESULTS_GLOB = "runs/eval_*"
-uvicorn backend.app:app --port 8000
-```
-
-Other environment variables: `GG_RUNS_DIR` (default `runs`).
-
-**⌨️ Keyboard shortcuts (Live Simulation):**
-
-| Key | Action | Key | Action |
-|---|---|---|---|
-| `Space` | Run / pause | `R` | Reset |
-| `N` | Step | `[` | Toggle sidebar |
-| `Shift+N` | Step ×4 | `Esc` | Close drawers |
 
 ---
 
@@ -344,10 +298,10 @@ python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both \
 <summary><b>🔎 Reproducibility notes</b></summary>
 
 - **Fixed splits.** Train: patients 1-6, validation: 7-8, test: 9-10 of each group (adolescent, adult, child).
-- **Fixed episodes.** Validation uses a fixed seed base (10,000,000) at every evaluation. Test evaluation uses `--seed-base`
+- **Fixed episodes.** Validation uses a fixed seed base at every evaluation. Test evaluation uses `--seed-base`
   (default 20,000,000), so every policy sees identical meals, noise and initial states.
 - **Seeds.** `--seed` controls the training run. Exact numbers can still vary slightly across PyTorch versions and platforms,
-  so compare against the CIs rather than the last decimal.
+  so compare against the confidence intervals rather than the last decimal.
 - **Skip training.** The trained checkpoints are already included in `runs/dqn_risk_s0_300/`; running only steps 2 and 3
   reproduces the tables and figures.
 - **Ablations.** Compare reward designs or the shield with `--reward-mode tir`, `--no-shield` and `--no-double` (use a
@@ -357,68 +311,52 @@ python graphs.py --run runs/dqn_risk_s0_300 --eval runs/eval_300_test_both \
 
 ---
 
-## 🧪 Testing
+## 🎬 Web UI demo (optional)
 
-```bash
-python test_wrapper.py                 # environment, metrics, baselines, rollout (~1-2 min, no torch needed)
-python test_dqn.py                     # DQN + training loop (~1 min)
-python -m pytest backend/tests -q      # API tests
-```
+A small web UI (**GlucoGuard research workstation**) lets you run live glucose simulations with any policy, compare policies
+side by side, and explore analytics and experiment results. It is a viewer on top of the RL project; none of the results above
+depend on it.
+
+<div align="center">
+
+### [▶️ Watch the web UI demo video](GlucoGuard_UI%20%282%29.mp4)
+
+<sub>Click to open the recording (MP4) stored in this repository.</sub>
+
+</div>
 
 <details>
-<summary><b>🌍 Optional: browser smoke test and frontend checks</b></summary>
+<summary><b>▶️ How to run the web UI</b></summary>
 
-Headless Chromium, needs a built UI and a running API on port 8000:
+Requires Node.js and npm. From the repository root, with the Python environment active:
 
 ```bash
-pip install playwright && playwright install chromium
-cd frontend && npm run build && cd ..
-uvicorn backend.app:app --port 8000     # in another terminal
-python frontend/e2e/ui_smoke.py
+cd frontend && npm install && npm run build && cd ..
+uvicorn backend.app:app --port 8000      # open http://localhost:8000
 ```
 
-Frontend lint and type-check: `cd frontend && npm run lint && npm run build`.
+To show the bundled evaluation results in the Analytics page, point the API at the `runs/eval_*` folders:
+
+```bash
+# Linux / macOS
+GG_RESULTS_GLOB="runs/eval_*" uvicorn backend.app:app --port 8000
+```
+
+```powershell
+# Windows (PowerShell)
+$env:GG_RESULTS_GLOB = "runs/eval_*"
+uvicorn backend.app:app --port 8000
+```
+
+For development with hot reload, run `uvicorn backend.app:app --reload --port 8000` in one terminal and
+`cd frontend && npm run dev` in another (UI at http://localhost:5173).
+API tests: `python -m pytest backend/tests -q`.
 
 </details>
 
 ---
 
-## 🧠 Method overview
-
-```mermaid
-flowchart LR
-    P["🧑 Virtual patient<br/>(SimGlucose)"] -->|noisy CGM| O["👁️ Observation<br/>8 CGM + IOB + time"]
-    O --> A["🤖 Double-DQN<br/>16 discrete actions"]
-    A -->|basal × bolus| S["🛡️ Safety shield<br/>+ dose caps"]
-    S --> I["💉 Insulin pump"]
-    I --> P
-    P -.->|true BG| R["🎁 Risk-aware reward"]
-    R -.-> A
-```
-
-| Component | Design |
-|---|---|
-| 🧬 Simulator | SimGlucose core simulator (patient + Dexcom CGM + pump + random meal scenario) |
-| ⏱️ Decision interval | 15 minutes (5 sensor samples), action held |
-| 👁️ Observation (11-dim) | last 8 CGM readings / 400, estimated IOB, sin/cos of time of day (+ meal grams only if `--announce-meals`) |
-| 💉 Actions (16 discrete) | basal multiplier {0, 0.5, 1.0, 1.5} × bolus {0, 0.03, 0.06, 0.12} × total daily insulin |
-| 🎁 Reward (per interval, from true BG) | +1 in range; mild linear hyper penalty; strong hypo penalty with extra below 54 mg/dL; terminal penalty if the simulator ends the episode |
-| 🛡️ Safety shield | suspend insulin if CGM < 80; block boluses that push estimated IOB above 0.20 × TDI; hard dose caps always on |
-| 🤖 Agent | Double-DQN, MLP 128-128, replay buffer 100k, hard target copy every 500 steps, Huber loss, linear epsilon decay 1.0 → 0.05 |
-| 🧑‍🤝‍🧑 Patients | 30 virtual patients, group-stratified: 18 train / 6 validation / 6 test |
-| 📏 Metrics | TIR (70-180), TBR (< 70, < 54), TAR (> 180, > 250), mean BG, LBGI, HBGI, early-termination rate, return |
-
-**Baselines** (all act through the same wrapper, caps and shield as the DQN):
-
-- 🎲 `random`: uniformly random action (sanity floor).
-- 💉 `fixed_basal`: nominal basal, never boluses.
-- 📐 `cgm_rule`: untuned hand-written CGM-only rule over the same discrete actions (a heuristic, not a clinical algorithm).
-- 🔒 `announced_bb`: basal-bolus using privileged information (announced meals, patient carb ratio and correction factor). It is
-  not a fair POMDP competitor; it shows what meal knowledge buys.
-
----
-
-## ⚖️ Scope and disclaimer
+## 📜 Scope and disclaimer
 
 - All results are obtained on SimGlucose virtual patients, evaluated on held-out patients never used in training or checkpoint
   selection.
